@@ -16,6 +16,15 @@ Download [paged_attention_explainer.html](paged_attention_explainer.html) and op
 
 Use **Next / Prev**, the **left and right arrow keys**, or **Jump to a phase**. On pool views, choose a sequence and token position, or click a block-table entry, to highlight its physical page and slot. The URL fragment records the current step, so reloading preserves it.
 
+## Annotated Paper and Video Walkthrough
+
+For a closer look at the paper behind the visualization:
+
+- [My annotated PagedAttention paper (PDF)](efficient_memory_management_for_llm_serving_with_paged_attention_annotations.pdf): the original paper with my annotations.
+- [My paper walkthrough on YouTube](https://www.youtube.com/watch?v=BCdFBukVL2M&t=2443s): a recorded walkthrough of the paper.
+
+Use these alongside the interactive visualization to connect the paper’s ideas with the concrete block-allocation and attention examples.
+
 ## Why Page the KV Cache?
 
 During autoregressive generation, each attention layer computes a query, key, and value for the token being processed. Its query attends to keys and values from earlier positions and its own position, subject to the causal mask. Keeping those earlier keys and values in a **KV cache** avoids recomputing them on every decode step.
