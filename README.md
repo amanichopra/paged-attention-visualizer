@@ -4,6 +4,12 @@ An interactive walkthrough of how an LLM inference engine allocates, reads, shar
 
 The visualization follows nano-vLLM’s small implementation and uses concrete token IDs, four-token pages, and a 16-block pool to make its behavior visible.
 
+## Demo
+
+![Animated walkthrough showing KV-cache allocation, token-to-slot lookup, shared prefix blocks, preemption, and reuse of cached blocks.](assets/paged-attention-demo.gif)
+
+A 30-second preview of the interactive walkthrough. [View the animation at full size](assets/paged-attention-demo.gif), or [download the HTML](paged_attention_explainer.html) and open it locally to explore each step at your own pace.
+
 ## Open the Visualization
 
 Download [paged_attention_explainer.html](paged_attention_explainer.html) and open it in a browser. Everything is contained in that one file: no installation, model weights, GPU, server, or network connection is needed. GitHub displays the HTML source; open the downloaded file locally to use the walkthrough.
