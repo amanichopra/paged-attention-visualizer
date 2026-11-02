@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PagedAttention in nano-vllm — Interactive Explainer</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1c2230;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #39c5cf;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #11161d, #0d1117);
+    position: sticky; top: 0; z-index: 20;
+  }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .wrap { display: grid; grid-template-columns: 1fr 360px; gap: 0; }
+  @media (max-width: 1100px) { .wrap { grid-template-columns: 1fr; } }
+  main { padding: 20px 24px 120px; }
+  aside {
+    border-left: 1px solid var(--border); padding: 20px; background: var(--panel);
+    position: sticky; top: 73px; height: calc(100vh - 73px); overflow-y: auto;
+  }
+  @media (max-width: 1100px) { aside { position: static; height: auto; border-left: none; border-top: 1px solid var(--border);} }
+
+  .controls {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+    background: #11161dcc; backdrop-filter: blur(8px); border-top: 1px solid var(--border);
+    padding: 12px 24px; display: flex; align-items: center; gap: 12px;
+  }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+  button.primary:hover { background: #79b8ff; }
+  .step-count { color: var(--muted); font-size: 13px; font-family: var(--mono); }
+  .progress-track { flex: 1; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--accent); transition: width .3s; }
+
+  .phase-badge {
+    display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .5px; padding: 3px 10px; border-radius: 20px; margin-bottom: 8px;
+  }
+  .b-profile { background: #1f2a1f; color: var(--green); }
+  .b-prefill { background: #26221a; color: var(--amber); }
+  .b-decode  { background: #1a2230; color: var(--accent); }
+  .b-prefix  { background: #241a2e; color: var(--purple); }
+  .b-sched   { background: #1a2a2b; color: var(--cyan); }
+  .b-arch    { background: #2a1a1f; color: var(--red); }
+
+  .stage-title { font-size: 17px; font-weight: 700; margin: 2px 0 10px; }
+  .narration { font-size: 14px; color: var(--text); }
+  .narration code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12.5px; color: var(--cyan); }
+  .narration .fileref { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+
+  /* Block pool */
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 18px 0 8px; font-weight: 700; }
+  .pool { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+  .block {
+    aspect-ratio: 1 / 1; border: 1px solid var(--border); border-radius: 6px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 11px; position: relative; transition: all .25s;
+    background: var(--panel2); min-height: 52px;
+  }
+  .block .bid { color: var(--muted); font-size: 9px; position: absolute; top: 2px; left: 4px; }
+  .block .ref { position: absolute; top: 2px; right: 4px; font-size: 9px; color: var(--amber); }
+  .block .label { font-weight: 700; }
+  .block .fill { font-size: 9px; color: var(--muted); }
+  .block.free { background: #0e1117; border-style: dashed; }
+  .block.seqA { background: #15243a; border-color: var(--accent); color: var(--accent); }
+  .block.seqB { background: #1c2e1c; border-color: var(--green); color: var(--green); }
+  .block.seqC { background: #2a2018; border-color: var(--amber); color: var(--amber); }
+  .block.shared { background: #241a2e; border-color: var(--purple); color: var(--purple); }
+  .block.writing { box-shadow: 0 0 0 2px var(--red), 0 0 12px var(--red); }
+  .block.justalloc { animation: pop .4s ease; }
+  @keyframes pop { 0% { transform: scale(.6); opacity: 0;} 100% { transform: scale(1); opacity: 1;} }
+
+  /* sequences + block tables */
+  .seqs { display: flex; flex-direction: column; gap: 10px; }
+  .seqrow { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel); }
+  .seqrow.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .seqrow .hd { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  .seqname { font-weight: 700; font-family: var(--mono); }
+  .status-pill { font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 700; text-transform: uppercase; }
+  .s-waiting { background: #2a2018; color: var(--amber); }
+  .s-running { background: #15243a; color: var(--accent); }
+  .s-finished{ background: #1f2a1f; color: var(--green); }
+  .s-preempt { background: #2a1a1f; color: var(--red); }
+  .tokens { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .btable { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
+  .btable .lbl { font-size: 10px; color: var(--muted); margin-right: 4px; }
+  .bcell {
+    font-family: var(--mono); font-size: 11px; padding: 3px 7px; border-radius: 4px;
+    background: var(--panel2); border: 1px solid var(--border);
+  }
+  .bcell.arrow { border: none; background: none; color: var(--muted); padding: 0 2px;}
+  .meta-line { font-size: 10.5px; color: var(--muted); font-family: var(--mono); margin-top: 4px; }
+
+  /* architecture diagram */
+  .arch { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .arch .box { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--panel2); font-size: 12px; }
+  .arch .box h4 { margin: 0 0 4px; font-size: 13px; color: var(--accent); }
+  .arch .box.impl { border-left: 3px solid var(--green); }
+  .arch .box.sub  { border-left: 3px solid var(--amber); }
+  .arch .box.not  { border-left: 3px solid var(--red); opacity: .8; }
+  .arch .tag { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; float: right; }
+  .arch .impl .tag { color: var(--green); }
+  .arch .sub .tag { color: var(--amber); }
+  .arch .not .tag { color: var(--red); }
+
+  /* aside */
+  aside h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 10px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border); flex: none;}
+  .sw-free { background: #0e1117; border-style: dashed; }
+  .sw-A { background: #15243a; border-color: var(--accent); }
+  .sw-B { background: #1c2e1c; border-color: var(--green); }
+  .sw-C { background: #2a2018; border-color: var(--amber); }
+  .sw-shared { background: #241a2e; border-color: var(--purple); }
+  .sw-write { background: var(--red); }
+  .code-note { margin-top: 16px; font-size: 11.5px; }
+  .code-note pre { background: #0e1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow-x: auto; font-family: var(--mono); font-size: 11px; color: var(--cyan); }
+  .jump { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px;}
+  .jump button { padding: 4px 8px; font-size: 11px; font-weight: 600; }
+  .fa-note { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--panel2); font-size:12px; margin-top:12px;}
+  .fa-note b { color: var(--accent); }
+  .stat { font-family: var(--mono); font-size: 12px; }
+  .stat b { color: var(--green); }
+
+  /* warmup profiling view */
+  .warmup-batch { display: flex; flex-direction: column; gap: 6px; }
+  .warmup-seq { display: flex; align-items: center; gap: 8px; }
+  .warmup-seq .wlabel { font-family: var(--mono); font-size: 11px; color: var(--muted); width: 54px; flex: none; }
+  .warmup-seq .wbar {
+    height: 26px; background: #26221a; border: 1px solid var(--amber); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; color: var(--amber);
+    font-family: var(--mono); font-size: 11px; font-weight: 700; flex: 1;
+  }
+  .warmup-note { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
+  .warmup-note b { color: var(--amber); }
+
+  .membar { display: flex; height: 46px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .memseg { display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 700; color: #0d1117; transition: flex .4s; white-space: nowrap; overflow: hidden; }
+  .memseg.weights { background: #6e7681; }
+  .memseg.peak    { background: var(--amber); }
+  .memseg.kv      { background: var(--green); }
+  .memseg.reserve { background: #30363d; color: var(--muted); }
+  .memlegend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 12px; }
+  .memlegend span { display: flex; align-items: center; gap: 6px; }
+  .memlegend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+
+  /* copy-on-write hypothetical view */
+  .cow-banner { background:#2a1a1f; border:1px solid var(--red); color:#ffb3ad; border-radius:8px; padding:10px 12px; font-size:13px; margin-bottom:16px; }
+  .cow-banner b { color: var(--red); }
+  .cow-caption { margin-top:14px; border:1px solid var(--border); background:var(--panel2); border-radius:8px; padding:12px; font-size:13px; }
+
+  /* decode-pressure trace table */
+  .trace { width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px; margin-top:4px; }
+  .trace th, .trace td { border:1px solid var(--border); padding:6px 10px; text-align:center; }
+  .trace th { background:var(--panel2); color:var(--muted); font-weight:700; text-transform:uppercase; font-size:10px; letter-spacing:.5px; }
+  .trace td.step { color:var(--muted); }
+  .trace td.alloc { color:var(--red); font-weight:700; }
+  .trace td.noalloc { color:var(--muted); }
+  .trace td.free { font-weight:700; }
+  .trace tr.exhaust td { background:#2a1a1f; }
+  .trace tr.exhaust td.free { color:var(--red); }
+  .trace .grab { color:var(--red); font-weight:700; }
+  .trace-cap { font-size:11.5px; color:var(--muted); margin-top:8px; }
+  .trace-cap b { color:var(--text); }
+
+  main, aside, .wrap > * { min-width: 0; }
+  .pool { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .block { aspect-ratio: auto; min-height: 92px; padding: 22px 8px 8px; }
+  .block .bid, .block .ref, .block .fill { font-size: 11px; }
+  .block.retained { background: #17232a; border: 1px dashed var(--cyan); color: var(--cyan); }
+  .sw-retained { background: #17232a; border: 1px dashed var(--cyan); }
+  .slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; width: 100%; margin: 7px 0; }
+  .slot { min-width: 0; padding: 4px 0; text-align: center; background: #ffffff0b; border: 1px solid currentColor; border-radius: 3px; font: 11px var(--mono); }
+  .slot.empty { color: var(--muted); border-color: var(--border); }
+  .slot.pending { border-style: dotted; color: var(--amber); background: transparent; }
+  .slot.new { border-color: var(--red); box-shadow: inset 0 -2px var(--red); }
+  .slot.selected, .bcell.selected { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .block.selected { box-shadow: 0 0 0 2px var(--cyan); }
+  .slot-key { color: var(--muted); font-size: 12px; }
+  .lookup { padding: 14px; margin-top: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .lookup-controls, .lookup-path { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .lookup-path { margin: 12px 0; font-family: var(--mono); font-size: 13px; }
+  .lookup-path strong { color: var(--cyan); }
+  .lookup label { font-size: 12px; }
+  select { color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; padding: 6px; }
+  .read-path { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .read-path button { font: 12px var(--mono); padding: 6px; }
+  .intro-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 22px; }
+  .intro-card { border: 1px solid var(--border); background: var(--panel); padding: 18px; border-radius: 8px; }
+  .intro-card h3 { margin: 0 0 8px; font-size: 16px; }
+  .intro-slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 16px 0; color: var(--accent); }
+  .intro-card p { font-size: 13px; }
+  .intro-result { color: var(--green); font-weight: 600; }
+  .table-scroll { overflow-x: auto; }
+  .trace { font-size: 11px; }
+  .trace th, .trace td { padding: 6px; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+  .jump button[aria-current="step"] { border-color: var(--accent); color: var(--accent); }
+  @media (max-width: 700px) {
+    header { position: static; padding: 16px; }
+    main { padding: 16px 16px 24px; }
+    aside { padding: 16px 16px 110px; }
+    .pool { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .intro-grid, .arch { grid-template-columns: 1fr; }
+    .controls { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    .controls button { padding: 8px 10px; }
+    .progress-track { flex-basis: 100%; }
+    .memseg { white-space: normal; font-size: 10px; padding: 4px; }
+    .membar { height: 74px; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>PagedAttention in nano-vllm — Interactive Explainer</h1>
+  <p>Explore how tokens map to GPU pages, share cached prefixes, and recover from memory pressure. Based on nano-vLLM and the SOSP’23 PagedAttention paper.</p>
+</header>
+
+<div class="wrap">
+  <main>
+    <div id="stage">
+      <span class="phase-badge b-profile" id="badge">Phase</span>
+      <div class="stage-title" id="title" role="heading" aria-level="2" aria-live="polite">—</div>
+      <div class="narration" id="narration">—</div>
+    </div>
+
+    <div id="archView" style="display:none">
+      <div class="section-label">Paper architecture — what nano-vllm implements</div>
+      <div class="arch" id="archGrid"></div>
+    </div>
+
+    <div id="cowView" style="display:none">
+      <div class="cow-banner">⚠ Hypothetical — illustrates the paper's copy-on-write. <b>nano-vllm does NOT implement this</b> (no beam search, no block-copy kernel).</div>
+      <div class="section-label">Two beams forked from one prompt — their block tables</div>
+      <div class="seqs" id="cowBeams"></div>
+      <div class="section-label" style="margin-top:16px">Physical blocks</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap" id="cowPhys"></div>
+      <div class="cow-caption" id="cowCaption"></div>
+    </div>
+
+    <div id="profileView" style="display:none">
+      <div class="section-label">Warmup batch — a large prefill used to profile memory</div>
+      <div class="warmup-batch" id="warmupBatch"></div>
+      <div class="section-label" style="margin-top:18px">GPU memory budget (what profiling measures)</div>
+      <div class="membar" id="memBar"></div>
+      <div class="memlegend" id="memLegend"></div>
+    </div>
+
+    <div id="introView" style="display:none"></div>
+    <div id="poolView">
+      <div id="traceWrap" style="display:none">
+        <div class="section-label">Decode-step trace — how the 3 free blocks get exhausted</div>
+        <div class="table-scroll"><table class="trace" id="traceTable"></table></div>
+        <div class="trace-cap" id="traceCap"></div>
+      </div>
+      <div id="lookup" class="lookup" hidden></div>
+      <div class="section-label">Physical KV cache — the block pool <span id="poolStat" class="stat"></span></div>
+      <div class="pool" id="pool"></div>
+      <p class="slot-key">Each cell represents K/V for one token, across layers. Numbers identify tokens, not K/V vectors. Solid = written · dotted = pending K/V · dash = unused capacity.</p>
+
+      <div class="section-label">Sequences &amp; their block tables (logical → physical)</div>
+      <div class="seqs" id="seqs"></div>
+    </div>
+  </main>
+
+  <aside>
+    <h3>Legend</h3>
+    <div class="legend-item"><div class="swatch sw-free"></div> Free block (in free list)</div>
+    <div class="legend-item"><div class="swatch sw-retained"></div> Free, with reusable cached content</div>
+    <div class="legend-item"><div class="swatch sw-A"></div> Sequence A pages</div>
+    <div class="legend-item"><div class="swatch sw-B"></div> Sequence B pages</div>
+    <div class="legend-item"><div class="swatch sw-C"></div> Sequence C pages</div>
+    <div class="legend-item"><div class="swatch sw-shared"></div> Shared (prefix cache, ref&gt;1)</div>
+    <div class="legend-item"><div class="swatch sw-write"></div> Being written this step</div>
+
+    <div class="fa-note">
+      <b>block_size = 4</b> here (nano-vllm default is 256). Small so you can see pages fill up.
+    </div>
+
+    <div class="code-note">
+      <div class="section-label" style="margin-top:14px">Jump to a phase</div>
+      <div class="jump" id="jump"></div>
+    </div>
+
+    <div class="code-note" id="codeNote"></div>
+  </aside>
+</div>
+
+<div class="controls">
+  <button id="reset">⟲ Reset</button>
+  <button id="prev">← Prev</button>
+  <button id="next" class="primary">Next →</button>
+  <span class="step-count" id="stepCount"></span>
+  <div class="progress-track"><div class="progress-fill" id="progress"></div></div>
+</div>
+
+<script>
+/* ============================================================================
+   Model of the world. block_size = 4 for visibility (nano-vllm default = 256).
+   Pool has 16 physical blocks. We drive a scripted lifecycle and render state.
+   ============================================================================ */
+const BLOCK_SIZE = 4;
+const NUM_BLOCKS = 16;
+
+// Each step is a pure snapshot-builder: given nothing, returns a full UI state.
+// We keep it declarative so Prev/Next/Reset/Jump all just re-render a snapshot.
+
+// Helpers to build sequence objects
+function seq(name, cls, status, tokens, blockTable, cached, scheduled, note) {
+  return { name, cls, status, tokens, blockTable, cached, scheduled, note };
+}
+
+// A "block" descriptor for the pool render: owner class, refcount, fill, label
+function poolFrom(seqs, writing=[], sharedIds=new Set(), retained=[]) {
+  // start all free
+  const blocks = Array.from({length: NUM_BLOCKS}, (_,i)=>({id:i, cls:'free', ref:0, fill:0, label:'free', owners:[], slots:Array(BLOCK_SIZE).fill(null), pending:Array(BLOCK_SIZE).fill(null), newSlots:[]}));
+  for (const r of retained) {
+    Object.assign(blocks[r.id], {cls:'retained', slots:[...r.slots], fill:r.slots.filter(x=>x!==null).length, label:'cached · free'});
+  }
+  for (const s of seqs) {
+    s.blockTable.forEach((bid, logical) => {
+      if (bid < 0) return;
+      const b = blocks[bid];
+      const used = s.written ?? s.cached;
+      const fillThis = Math.max(0, Math.min(BLOCK_SIZE, used - logical*BLOCK_SIZE));
+      b.ref += 1;
+      b.owners.push(s.name + '·' + logical);
+      b.cls = b.ref > 1 ? 'shared' : s.cls;
+      b.fill = Math.max(b.fill, fillThis);
+      b.label = b.owners.join(' / ');
+      for (let offset=0; offset<BLOCK_SIZE; offset++) {
+        const pos=logical*BLOCK_SIZE+offset;
+        if (pos<used) b.slots[offset]=s.tokens[pos];
+        else if (pos<s.tokens.length) b.pending[offset]=s.tokens[pos];
+        if (writing.includes(bid) && pos>=s.cached && pos<used) b.newSlots.push(offset);
+      }
+    });
+  }
+  for (const w of writing) blocks[w].writing = true;
+  return blocks;
+}
+
+function freeCount(blocks){ return blocks.filter(b=>b.ref===0).length; }
+
+/* ---- The scripted steps ---- */
+const STEPS = [];
+
+function addStep(s){ s.id = s.id || s.title.split(' — ')[0].toLowerCase().replaceAll(' ', '-'); STEPS.push(s); }
+
+// 0 — Architecture overview
+addStep({
+  phase:'arch', badge:'Paper → nano-vllm', title:'The objects the PagedAttention paper describes',
+  arch:true,
+  narration:`The vLLM/PagedAttention paper (Kwon et al., SOSP 2023) splits the system into a few cooperating objects. nano-vllm implements most of them — and deliberately <b>substitutes</b> a couple. Green = capability present, amber = implemented differently, red = not implemented. Click <b>Next</b> to start the lifecycle.`,
+  code:`<b>Where each lives in nano-vllm</b>
+<pre>Scheduler        → engine/scheduler.py
+KV Cache Manager → engine/block_manager.py
+GPU allocator    → BlockManager free_block_ids / used_block_ids
+Workers          → engine/model_runner.py (one per TP rank)
+PagedAttention   → layers/attention.py (FlashAttention paged kernels)</pre>`
+});
+
+// 1 — Profiling
+addStep({
+  phase:'profile', badge:'Startup 1/2', title:'1 — Warmup: measure memory with a large prefill',
+  profile:true, profileMode:'warmup',
+  narration:`The worker profiles a large dummy prefill before allocating the KV pool. It uses all-zero token IDs because the tensor shapes matter here. <span class="fileref">model_runner.py: warmup_model()</span><br><br>Each sequence has <code>min(max_num_batched_tokens, max_model_len)</code> tokens. The sequence count is limited by both the token budget and <code>max_num_seqs</code>; it need not fill the entire budget for every configuration. The measured peak guides sizing, but is not a proof that every later workload will fit.`,
+  code:`<b>warmup_model (model_runner.py)</b>
+<pre>reset_peak_memory_stats()
+seq_len  = min(max_batched_tokens,
+               max_model_len)      # 4096
+num_seqs = min(max_batched_tokens
+               // seq_len,
+               max_num_seqs)        # 4
+seqs = [Sequence([0]*seq_len)
+        for _ in range(num_seqs)]
+self.run(seqs, is_prefill=True)</pre>
+Dummy tokens are all <b>0</b> — only the shapes matter. <code>block_table</code> is empty, so <code>prepare_prefill</code> skips <code>slot_mapping</code> (no pool yet).`
+});
+
+// 1b — carve the pool
+addStep({
+  phase:'profile', badge:'Startup 2/2', title:'2 — Carve the block pool from leftover memory',
+  profile:true, profileMode:'carve',
+  narration:`After warmup, <code>allocate_kv_cache</code> reads back the measured <b>peak</b> and computes how much memory is left for the KV cache: take <code>gpu_memory_utilization</code> (e.g. 90%) of total GPU memory, subtract the model weights and peak activations, and divide the remainder by the bytes-per-block. <span class="fileref">model_runner.py:103 allocate_kv_cache()</span><br><br>That quotient is <code>num_kvcache_blocks</code> — here, <b>16 fixed-size blocks</b>, each holding <code>block_size=4</code> tokens of K and V per layer. All 16 start in the free list. Profiling leaves headroom for model execution. The proportions below are illustrative, not measured GPU usage.`,
+  seqs:[], writing:[], poolStat:`16 blocks free`,
+  // NOTE: still show the membar so the KV slice is visible, handled in render
+  code:`<b>allocate_kv_cache (model_runner.py)</b>
+<pre>peak = memory_stats["...peak"]
+block_bytes = 2 * n_layers * block_size
+            * n_kv_heads * head_dim * itemsize
+num_blocks = (total*util - used
+              - peak + cur) // block_bytes
+self.kv_cache = torch.empty(
+   2, n_layers, num_blocks,
+   block_size, n_kv_heads, head_dim)</pre>
+The <b>2</b> = K and V. Each attention layer gets a view: <code>k_cache = kv_cache[0, layer]</code>.`
+});
+
+// 2 — Seq A arrives (waiting)
+let A = seq('A','seqA','WAITING',[11,12,13,14,15,16,17], [], 0, 0);
+addStep({
+  phase:'sched', badge:'Scheduler', title:'3 — Request A arrives → WAITING queue',
+  seqs:[cloneSeq(A)], writing:[],
+  poolStat:`16 blocks free`,
+  narration:`A request with a 7-token prompt enters. The scheduler puts it in the <b>WAITING</b> queue. No KV memory is allocated yet. <span class="fileref">scheduler.py:22 add()</span><br><br>7 tokens with block_size 4 ⇒ it will need <b>⌈7/4⌉ = 2 blocks</b>.`,
+  code:`<b>Sequence (sequence.py)</b>
+<pre>num_blocks =
+  (num_tokens + block_size-1)//block_size
+# = (7+3)//4 = 2</pre>`
+});
+
+// 3 — can_allocate + allocate A
+A = seq('A','seqA','RUNNING',[11,12,13,14,15,16,17], [2,0], 0, 7);
+addStep({
+  phase:'prefill', badge:'Prefill', title:'4 — Schedule A for prefill: allocate 2 blocks',
+  seqs:[cloneSeq(A)], writing:[],
+  sharedIds:new Set(),
+  poolStat:`14 blocks free · 2 used`,
+  justAlloc:[2,0],
+  narration:`<code>can_allocate</code> checks the free list has room, then <code>allocate</code> pops two blocks for A. For this example, assume prior requests left the free deque in order <code>[2,0,1,3,…,15]</code>. A fresh nano-vLLM pool starts at <code>[0,1,2,…]</code>. Here allocation hands back <b>#2</b> then <b>#0</b>, so A's <b>block table</b> → <code>[2, 0]</code>: logical block 0 → physical #2, logical block 1 → physical #0. This is the paper's <b>page table</b>, and the whole point of it — A's two logical blocks live in <b>non-contiguous</b> physical memory, and nothing cares. <span class="fileref">block_manager.py:58, 75</span>`,
+  code:`<b>allocate (block_manager.py)</b>
+<pre>for i in range(num_cached, num_blocks):
+    seq.block_table.append(
+        self._allocate_block())  # pop free</pre>
+<code>_allocate_block</code> does <code>free_block_ids.popleft()</code>
+— whatever id is at the head of the free deque,
+not necessarily the next integer.`
+});
+
+// 4 — prefill writes KV via slot_mapping
+A = seq('A','seqA','RUNNING',[11,12,13,14,15,16,17], [2,0], 0, 7);
+addStep({
+  phase:'prefill', badge:'Prefill', title:'5 — Prefill forward: scatter K/V into the pool',
+  seqs:[{...cloneSeq(A), written:7}], writing:[2,0], lookup:true,
+  poolStat:`14 free · 2 used (writing)`,
+  narration:`The 7 prompt tokens run through the model in <b>one batched forward</b>. For each token, its K/V is written to a flat <b>slot</b> = <code>block_id*block_size + offset</code>. The <code>slot_mapping</code> array is built in <span class="fileref">prepare_prefill (model_runner.py:129)</span> and a Triton kernel scatters K/V into the pool. <span class="fileref">store_kvcache_kernel attention.py:10</span><br><br>Logical tokens 0–3 → physical block <b>#2</b> (full), tokens 4–6 → physical block <b>#0</b> (3/4 full). Note the K/V physically land in #2 and #0 even though they're consecutive tokens — the slot numbers come straight from the block table.`,
+  code:`<b>store_kvcache_kernel (attention.py)</b>
+<pre>slot = slot_mapping[idx]
+if slot == -1: return
+cache[slot*D + ...] = key   # scatter</pre>
+Then <b>FlashAttention</b> computes attention:
+<pre>flash_attn_varlen_func(q,k,v,
+   cu_seqlens_q, cu_seqlens_k,
+   causal=True)</pre>`
+});
+
+// 5 — prefill done, first decode token appended
+A = seq('A','seqA','RUNNING',[11,12,13,14,15,16,17,91], [2,0], 7, 0);
+addStep({
+  phase:'decode', badge:'Decode', title:'6 — Prefill done → sample first token',
+  seqs:[cloneSeq(A)], writing:[],
+  poolStat:`14 free · 2 used`,
+  narration:`Prefill produced logits for the last position; the sampler picks token <b>91</b> and appends it. A now has 8 token IDs, but only <b>7 positions of K/V</b>. Token 91 is dotted: its K/V will be computed on the next forward pass. <code>num_cached_tokens</code> advances to 7 and scheduled work resets to 0. <br><br>Crucially, <code>postprocess</code> also runs <code>hash_blocks</code> now: logical block 0 (physical <b>#2</b>) is <b>full</b> (tokens 11,12,13,14), so it gets a content hash registered in <code>hash_to_block_id</code> → <b>#2</b>. (Logical block 1 / physical #0 is only 3/4 full → not hashed yet.) <b>This registration is what a future request's prefix lookup will match</b> — it enables B’s later prefix-cache hit. The sequence then moves to steady-state <b>decode</b>. <span class="fileref">scheduler.py:81 postprocess() → block_manager.py:110 hash_blocks()</span>`,
+  code:`<b>postprocess (scheduler.py)</b>
+<pre>self.block_manager.hash_blocks(seq)  # ← register
+seq.num_cached_tokens += scheduled
+seq.append_token(token_id)</pre>
+<code>hash_blocks</code> hashes only <b>full</b> blocks
+(end = (cached + scheduled) // block_size), so
+logical block 0 (phys #2) is registered.`
+});
+
+// 6 — decode needs a new block (may_append)
+A = seq('A','seqA','RUNNING',[11,12,13,14,15,16,17,91,92], [2,0,1], 8, 1);
+addStep({
+  phase:'decode', badge:'Decode', title:'7 — Process token 9: allocate a page before writing its K/V',
+  seqs:[{...cloneSeq(A), written:A.tokens.length}], writing:[1], lookup:true,
+  justAlloc:[1],
+  poolStat:`13 free · 3 used`,
+  narration:`An intervening decode pass processes token 91 and samples token 92. There are now <b>9 token IDs and 8 cached positions</b>. Before processing token 92, <code>may_append</code> allocates physical block <b>#1</b> because <code>len(seq) % 4 == 1</code>.<br><br>This view shows the forward pass writing token 92’s K/V into its new slot. Allocation happens <b>before the forward pass for an already sampled token</b>. A’s table is now <code>[2,0,1]</code>. Use the lookup below to follow a token to its physical slot.`,
+  code:`<b>may_append (block_manager.py)</b>
+<pre>if len(seq) % block_size == 1:
+    # just spilled into a new block
+    seq.block_table.append(
+        self._allocate_block())</pre>`
+});
+
+// 7 — decode uses FlashAttention paged kernel
+A = seq('A','seqA','RUNNING',[11,12,13,14,15,16,17,91,92,93], [2,0,1], 9, 1);
+addStep({
+  phase:'decode', badge:'Decode', title:'8 — How attention reads scattered pages',
+  seqs:[{...cloneSeq(A), written:A.tokens.length}], writing:[1], lookup:true,
+  poolStat:`13 free · 3 used`,
+  narration:`At decode, the single query token must attend to <b>all</b> past K/V — which live in physically scattered blocks <b>[2,0,1]</b> (logical order 0,1,2 → physical 2,0,1). nano-vllm doesn't hand-write a kernel; it passes the <b>block table</b> to <code>flash_attn_with_kvcache</code>, which gathers K/V through it as if contiguous. The kernel walks logical positions in order but every load bends through the table to a scattered physical block. <b>That indirection IS PagedAttention.</b> <span class="fileref">attention.py:72</span>`,
+  code:`<b>decode path (attention.py)</b>
+<pre>flash_attn_with_kvcache(
+   q.unsqueeze(1), k_cache, v_cache,
+   cache_seqlens=context_lens,
+   block_table=context.block_tables,
+   causal=True)</pre>
+The <code>block_table</code> → <code>context</code> hand-off happens in <code>prepare_decode</code> (model_runner.py:172).`
+});
+
+// The previous forward completes and samples token 94.
+A = seq('A','seqA','RUNNING',[11,12,13,14,15,16,17,91,92,93,94], [2,0,1], 10, 0);
+
+// 8 — Seq B arrives sharing a prefix with A
+let B = seq('B','seqB','WAITING',[11,12,13,14,15,16,17,55], [], 0, 0);
+addStep({
+  phase:'prefix', badge:'Prefix cache', title:'9 — Request B arrives — same prompt prefix as A',
+  seqs:[cloneSeq(A), cloneSeq(B)], writing:[],
+  poolStat:`13 free · 3 used`,
+  narration:`B's prompt shares seven token IDs with A, but only <b>one complete four-token block can be reused</b> (11,12,13,14) with A — a common system prompt, say. In a naive server, B would recompute and re-store that prefix. PagedAttention can <b>share the physical block</b> instead. <br><br>When B is admitted, <code>can_allocate</code> hashes B's prompt blocks (same prefix-chained hash) and <b>looks them up</b> in <code>hash_to_block_id</code> — the table A populated when A completed prefill. B's block 0 hash matches A's registered entry (→ physical <b>#2</b>) → a hit. (This is the <i>read</i> side; A’s completed forward was the <i>write</i> side.) <span class="fileref">block_manager.py:58 can_allocate()</span>`,
+  code:`<b>can_allocate — the lookup (block_manager.py)</b>
+<pre>h = -1
+for i in range(num_blocks - 1):
+    h = compute_hash(seq.block(i), h)  # chained
+    block_id = hash_to_block_id.get(h, -1)
+    if block_id == -1 or \\
+       blocks[block_id].token_ids != tokens:
+        break            # no more prefix match
+    num_cached_blocks += 1</pre>
+It re-checks <code>token_ids</code>, not just the hash — so a reused/stale block can't false-match.`
+});
+
+// 9 — prefix hit: B reuses block #2, ref++
+B = seq('B','seqB','RUNNING',[11,12,13,14,15,16,17,55], [2,3], 4, 4);
+addStep({
+  phase:'prefix', badge:'Prefix cache', title:'10 — Prefix hit: B shares block #2 (read-only, ref-counted)',
+  seqs:[cloneSeq(A), {...cloneSeq(B), written:8}], writing:[3], lookup:true,
+  sharedIds:new Set([2]),
+  justAlloc:[3],
+  poolStat:`12 free · 4 used · block #2 shared (ref=2)`,
+  narration:`<code>can_allocate</code> walks B's blocks, hashes block 0, finds it already in <code>hash_to_block_id</code> → <b>cache hit!</b> B's block table reuses physical block <b>#2</b> (A's logical-block-0) and its <b>ref_count goes to 2</b> (shared, shown purple). B only needs a fresh block (<b>#3</b>) for its non-shared tail → B = <code>[2,3]</code>. Note B's logical block 0 and A's logical block 0 both point at physical #2 — two block tables, one physical page. <br><br>B's prefill now processes just <code>8 − 4 = 4</code> tokens — the prefix’s K/V and intermediate states are reused; the four new queries still attend to that cached prefix. <br><br>This is <b>prefix sharing</b>. nano-vllm has no block-copy path for writable shared tails: shared blocks are always <i>full, immutable blocks (including previously generated tokens)</i>, so nobody ever writes into one. The next example shows writable sharing that <i>would</i> require a copy. <span class="fileref">block_manager.py:75 allocate(), ref_count</span>`,
+  code:`<b>allocate — the cache-hit branch</b>
+<pre>if block_id in used_block_ids:
+    block.ref_count += 1   # SHARE
+else:
+    block.ref_count = 1
+seq.num_cached_tokens =
+   num_cached_blocks * block_size</pre>`
+});
+
+// 10b — HYPOTHETICAL: beam-search copy-on-write (paper, NOT nano-vllm)
+addStep({
+  phase:'prefix', badge:'Hypothetical', title:'11 — What would force a copy: beam-search COW (paper, not nano-vllm)',
+  cow:true, cowStage:'before',
+  narration:`<b>This step is illustrative — nano-vllm does NOT implement it.</b> It shows a situation that motivates the paper's copy-on-write: <b>parallel sampling / beam search</b>, where one prompt spawns several completions.<br><br>Imagine beams <b>X</b> and <b>Y</b> forked from the same prompt. They share a <i>partially-filled</i> block (block 0, holding prompt tokens 11,12 + two free slots), <code>ref_count=2</code>. Both beams initially reference the same data. The difference: this block has <b>room to be written</b>, and the two beams are about to generate <b>different</b> next tokens. Click Next to see the write.`,
+  code:`<b>Paper §4.3 — copy-on-write</b>
+<pre>block = blocks[shared_id]
+if block.ref_count > 1 and WRITE:
+    new_id = allocate()          # copy
+    copy_block(new_id, shared_id)
+    block.ref_count -= 1
+    seq.block_table[i] = new_id
+    write(new_id, new_token)</pre>
+nano-vllm has <b>no</b> copy_block kernel — this
+path never exists because shared blocks are
+full & immutable.`
+});
+
+// 10c — HYPOTHETICAL: the copy fires
+addStep({
+  phase:'prefix', badge:'Hypothetical', title:'12 — The copy fires: beam X diverges → private copy',
+  cow:true, cowStage:'after',
+  narration:`Beam <b>X</b> wants to write token <code>77</code> into the shared block; beam <b>Y</b> wants token <code>88</code>. They can't both live in one physical block. Because <code>ref_count &gt; 1</code>, the system <b>copies</b> block 0 into a fresh physical block (block 5), decrements block 0's ref to 1, repoints <b>X</b>'s block table at the copy, and writes 77 there. <b>Y</b> keeps the original and writes 88 into it.<br><br>That duplication, triggered <i>by the write</i>, is the <b>copy</b> in copy-on-write. The shared read-only prefix (tokens 11,12) was duplicated only at the moment the beams diverged — not a byte sooner. <b>Again: nano-vllm skips all of this by never sharing a writable block.</b>`,
+  code:`<b>Why nano-vllm avoids it</b>
+<pre>• hash_blocks() only hashes FULL blocks
+• can_allocate() only reuses FULL blocks
+• new tokens → the seq's OWN tail block
+⇒ a shared block is never written
+⇒ no copy ever needed</pre>
+The paper needs COW for beam search;
+nano-vllm doesn't implement beam search.`
+});
+
+// Continue after B’s prefill. A keeps its previously sampled token and cached state.
+// Derive both the trace and its final snapshots from the same scheduling example.
+// This models nano-vLLM's decode order: allocate -> forward -> hash -> sample.
+function pressureExample() {
+  const initial = [cloneSeq(A), seq('B','seqB','RUNNING',[11,12,13,14,15,16,17,55,56],[2,3],8,0),
+    seq('C','seqC','RUNNING',Array.from({length:37},(_,i)=>200+i),[4,5,6,7,8,9,10,11,12],36,0)];
+  const running=initial.map(cloneSeq), free=[13,14,15], rows=[];
+  let preempted, beforeForward, retained=[];
+  for (let step=1; step<=5; step++) {
+    const cells={}, scheduled=[];
+    for (const sq of [...running]) {
+      if (!running.includes(sq)) continue;
+      const cell={before:sq.tokens.length, allocation:null};
+      if (sq.tokens.length % BLOCK_SIZE === 1) {
+        if (!free.length) {
+          const victim=running.pop();
+          const old=cloneSeq(victim);
+          for (const id of [...victim.blockTable].reverse()) free.push(id);
+          retained=old.blockTable.map((id,i)=>({id,slots:old.tokens.slice(i*4,i*4+4)}));
+          victim.blockTable=[]; victim.cached=0; victim.scheduled=0; victim.status='WAITING(preempted)';
+          preempted=victim;
+          cells[victim.name]={before:old.tokens.length,preempted:true};
+          cell.victim=victim.name;
+        }
+        cell.allocation=free.shift();
+        sq.blockTable.push(cell.allocation);
+        retained=retained.filter(b=>b.id!==cell.allocation);
+      }
+      sq.scheduled=1;
+      scheduled.push(sq); cells[sq.name]=cell;
+    }
+    if (preempted) beforeForward=[...scheduled,preempted].map(cloneSeq);
+    for (const sq of scheduled) {
+      sq.cached=sq.tokens.length; sq.scheduled=0;
+      sq.tokens.push(step===5 && sq.name==='A' ? 0 : sq.tokens.at(-1)+1);
+      cells[sq.name].after=sq.tokens.length;
+    }
+    rows.push({step,cells,free:free.length,preempted:!!preempted});
+  }
+  // A's fifth decode samples EOS. Full unreferenced pages retain reusable KV.
+  const done=running.find(s=>s.name==='A');
+  for (const id of [...done.blockTable].reverse()) {
+    if (id===2) continue; // B still owns the shared prefix.
+    const i=done.blockTable.indexOf(id);
+    if ((i+1)*4<=done.cached) retained.push({id,slots:done.tokens.slice(i*4,i*4+4)});
+    free.push(id);
+  }
+  done.status='FINISHED'; done.blockTable=[]; done.cached=0;
+  const after=[...running,preempted].map(cloneSeq);
+  const retainedAfter=retained.map(b=>({...b,slots:[...b.slots]}));
+  // C's first nine full blocks survived. Its tenth (#14) was reused by B.
+  const resumed=cloneSeq(preempted);
+  resumed.blockTable=[4,5,6,7,8,9,10,11,12];
+  resumed.cached=36; resumed.scheduled=resumed.tokens.length-36; resumed.written=resumed.tokens.length;
+  resumed.status='RUNNING';
+  for (const id of resumed.blockTable) free.splice(free.indexOf(id),1);
+  const newBlocks=[free.shift(),free.shift()];
+  resumed.blockTable.push(...newBlocks);
+  const remaining=retained.filter(b=>!resumed.blockTable.includes(b.id));
+  return {initial,rows,beforeForward,retainedBefore:retainedAfter.filter(b=>b.id>=4 && b.id<=12),after,retainedAfter,
+    resumed:[cloneSeq(done),cloneSeq(running.find(s=>s.name==='B')),resumed],remaining,newBlocks};
+}
+const pressure=pressureExample();
+addStep({id:'pressure',phase:'sched',badge:'Scheduler',title:'Memory pressure: follow five decode iterations',
+  seqs:pressure.initial,trace:true,
+  narration:'B’s prefill has sampled token 56. A long request C has also completed prefill and sampled its first token. There are <b>3 free blocks</b>. The trace below checks each sequence’s length <b>before</b> its forward pass, just like <code>can_append</code>.<br><br>The last free block is allocated on iteration 3. Iteration 4 still fits: no sequence needs a new page. On iteration 5, <b>B needs a page</b>, so the scheduler preempts C from the back of the running queue. Zero free blocks alone does not trigger preemption.',
+  code:'<b>schedule() — decode</b><pre>seq = running.popleft()\nwhile not can_append(seq):\n    preempt(running.pop())\nmay_append(seq)\n# forward, then sample one new token</pre>Prefill has priority in this checkout. Decode batches up to max_num_seqs. Prefill uses max_num_batched_tokens and can chunk the first scheduled request.'
+});
+addStep({id:'preempt',phase:'sched',badge:'Preemption',title:'Preempt C so B can append',
+  seqs:pressure.beforeForward,retained:pressure.retainedBefore,justAlloc:[14],
+  narration:'Iteration 5, <b>before the forward pass</b>: B has 13 token IDs and needs a fourth page. The free list is empty. The scheduler releases all 10 of C’s pages, then gives B <b>#14</b>, the first page in the newly replenished free deque.<br><br>C returns to the front of WAITING with its token IDs intact and its cached-token counter reset. Its other nine full blocks still contain cached K/V. The dashed cyan blocks are <b>free to allocate, but reusable by a matching prefix</b> until overwritten.',
+  code:'<b>preempt() / deallocate()</b><pre>seq.status = WAITING\nseq.is_prefill = True\ndeallocate(seq)\nwaiting.appendleft(seq)</pre>Deallocation releases references and clears the sequence’s block table. It does not erase the physical contents or cached hashes. There is no CPU swap.'
+});
+addStep({id:'cleanup',phase:'prefix',badge:'Cleanup',title:'A samples EOS; B keeps the shared prefix',
+  seqs:pressure.after,retained:pressure.retainedAfter,
+  narration:'The scheduled forward pass completes. A samples EOS and releases its private pages <b>#0, #1, #15</b>. B still references <b>#2</b>, so that block’s reference count falls from 2 to 1 and it remains allocated.<br><br>B has also written into #14 and sampled its next token. Reusable full pages remain marked as cached even when their reference count is zero. The pool now has enough room to readmit C.',
+  code:'<b>Reference-counted release</b><pre>for id in reversed(seq.block_table):\n    blocks[id].ref_count -= 1\n    if blocks[id].ref_count == 0:\n        free_block_ids.append(id)</pre>Free means available for allocation. It does not necessarily mean empty.'
+});
+addStep({id:'resume',phase:'prefix',badge:'Resume',title:'C resumes: reuse 36 positions, recompute 5',
+  seqs:pressure.resumed,retained:pressure.remaining,writing:pressure.newBlocks,justAlloc:pressure.newBlocks,lookup:true,
+  narration:'C has <b>41 token IDs</b>. On readmission, <code>can_allocate</code> finds its first <b>9 full blocks = 36 cached positions</b> still available. The next cached block was #14, which B has overwritten, so the prefix lookup stops there.<br><br>C reclaims #4–#12 and receives #15 and #1 for its remaining five positions. This forward pass recomputes four previously cached positions plus the last sampled token’s first K/V. <b>Recompute strategy means no CPU swap; it does not require recomputing surviving cached prefixes.</b>',
+  code:'<b>can_allocate() / allocate()</b><pre>for i in range(seq.num_blocks - 1):\n    # find matching prefix blocks\n    # stop at the first miss\nseq.num_cached_tokens = cached_blocks * 4</pre>The final logical block is always excluded from reuse. With no surviving matching prefix, the entire sequence would be re-prefilled.'
+});
+
+// 13 — Recap
+addStep({
+  phase:'arch', badge:'Recap', title:'16 — The three pillars, mapped',
+  arch:true, recap:true,
+  narration:`You just watched the paper's three pillars: <b>(1)</b> paged, non-contiguous KV storage (block pool + block tables + slot mapping); <b>(2)</b> sharing via reference-counted, content-hashed blocks (automatic prefix caching; copy-on-write shown separately as a paper concept); <b>(3)</b> a continuous-batching scheduler with recompute preemption. The attention math itself is delegated to FlashAttention's block-table-aware kernels. Hit <b>Reset</b> to replay.`,
+  code:`<b>The honest caveats</b>
+<pre>• FastAPI / HTTP server:
+    NOT implemented → offline batch
+    library; entry = LLM.generate()
+• CPU block allocator / swap-to-CPU:
+    NOT implemented → uses recompute
+• Workers = tensor-parallel ModelRunner
+    procs, coordinated via shared memory
+• PagedAttention kernel = FlashAttention
+    (flash_attn_varlen_func /
+     flash_attn_with_kvcache)</pre>`
+});
+
+function cloneSeq(s){ return JSON.parse(JSON.stringify(s)); }
+
+/* ---- Architecture grid data ---- */
+const ARCH = [
+  {cls:'not', tag:'not implemented', h:'FastAPI / API server', b:'Real vLLM exposes an HTTP endpoint (<span class="fileref">vllm.entrypoints.api_server</span>) with a request queue. nano-vllm is an <b>offline batch library</b> — entry is <code>LLM.generate()</code> called from a script (<span class="fileref">example.py</span>), no socket or port.'},
+  {cls:'impl', tag:'implemented', h:'Scheduler', b:'Decides which requests run each step; continuous batching, chunked prefill, preemption. <span class="fileref">scheduler.py</span>'},
+  {cls:'impl', tag:'implemented', h:'KV Cache Manager', b:'Maps logical blocks → physical, maintains block tables, hashing & prefix cache. <span class="fileref">block_manager.py</span>'},
+  {cls:'impl', tag:'implemented', h:'GPU Block Allocator', b:'Free list + used set over the physical pool; allocate/deallocate pages. <span class="fileref">BlockManager.free_block_ids</span>'},
+  {cls:'sub', tag:'substituted', h:'Workers', b:'One ModelRunner process per tensor-parallel rank; rank 0 drives the rest via shared memory + events. <span class="fileref">model_runner.py</span>'},
+  {cls:'sub', tag:'different', h:'Preemption recovery', b:'Paper: swap-to-CPU OR recompute. nano-vllm chooses <b>recompute</b> — evicted blocks are freed and re-prefilled later.'},
+  {cls:'not', tag:'not implemented', h:'CPU Block Allocator', b:'The paper keeps a CPU-side pool to swap blocks out under pressure. nano-vllm has none — it recomputes instead.'},
+  {cls:'impl', tag:'implemented', h:'PagedAttention kernel', b:'Delegated to FlashAttention paged kernels that read K/V through the block table. <span class="fileref">attention.py</span>'},
+  {cls:'not', tag:'not implemented', h:'Copy-on-write / beam search', b:'The hypothetical beam example needs a block-copy path. nano-vLLM shares full blocks only and has no such copy kernel.'},
+  {cls:'impl', tag:'implemented', h:'Prefix cache', b:'Content-hash blocks, ref-counted sharing of identical prefixes across sequences. <span class="fileref">block_manager.py hash_blocks</span>'},
+];
+
+STEPS.unshift({id:'intro',phase:'prefill',badge:'Why pages?',title:'Grow the KV cache one page at a time',intro:true,
+  narration:'During generation, attention reuses the <b>keys and values (K/V)</b> computed for earlier tokens. As a request grows, so does this cache. PagedAttention divides storage into fixed-size blocks and uses a <b>block table</b> to find them. A request’s consecutive tokens can live in physically scattered GPU blocks.',
+  code:'<b>One address calculation</b><pre>logical_block = position // block_size\noffset = position % block_size\nphysical_block = block_table[logical_block]\nslot = physical_block * block_size + offset</pre>Use Next, Prev, or the arrow keys. On pool steps, select a token position or click a block-table entry to follow the mapping. The diagrams use four-token pages; nano-vLLM defaults to 256.'
+});
+
+/* ============================= Rendering ============================= */
+let cur = 0;
+
+const el = id => document.getElementById(id);
+
+function render() {
+  const s = STEPS[cur];
+  // badge class
+  const badgeClassMap = {profile:'b-profile', prefill:'b-prefill', decode:'b-decode', prefix:'b-prefix', sched:'b-sched', arch:'b-arch'};
+  const badge = el('badge');
+  badge.className = 'phase-badge ' + (badgeClassMap[s.phase]||'b-arch');
+  badge.textContent = s.badge;
+  el('title').textContent = s.title.replace(/^\d+ — /,'');
+  el('narration').innerHTML = s.narration;
+  el('codeNote').innerHTML = s.code || '';
+
+  el('introView').style.display = s.intro ? 'block' : 'none';
+  // arch / profile / cow / pool view
+  el('archView').style.display = s.arch ? 'block' : 'none';
+  el('profileView').style.display = s.profile ? 'block' : 'none';
+  el('cowView').style.display = s.cow ? 'block' : 'none';
+  el('poolView').style.display = (s.intro || s.arch || s.cow || (s.profile && s.profileMode==='warmup')) ? 'none' : 'block';
+
+  if (s.intro) renderIntro();
+  else if (s.arch) renderArch(s);
+  else if (s.profile) { renderProfile(s); if (s.profileMode==='carve') renderPool(s); }
+  else if (s.cow) renderCOW(s);
+  else renderPool(s);
+
+  // controls
+  el('stepCount').textContent = `Step ${cur+1} / ${STEPS.length}`;
+  el('progress').style.width = ((cur)/(STEPS.length-1)*100) + '%';
+  el('prev').disabled = cur===0;
+  el('next').disabled = cur===STEPS.length-1;
+  renderJump();
+}
+
+function renderCOW(s){
+  const after = s.cowStage === 'after';
+  // Two beams X, Y. The shared prompt [11,12] fits in ONE partially-filled block.
+  // Before: both have a single logical block L0 → physical #0 (shared, ref2).
+  // After:  X's L0 repoints to the copy #5 (token 77); Y's L0 stays #0 (token 88).
+  const beams = [
+    { name:'X', cls:'seqA', col:'var(--accent)',
+      table: after ? [ ['L0','#5'] ] : [ ['L0','#0'] ],
+      wrote: after ? '77' : null },
+    { name:'Y', cls:'seqB', col:'var(--green)',
+      table: [ ['L0','#0'] ],
+      wrote: after ? '88' : null },
+  ];
+
+  // physical blocks shown: #0 (shared prompt), and #5 (the copy, only after)
+  const physBlocks = [
+    { id:0, label:'11,12,'+(after?'88,·':'·,·'), ref: after?1:2, cls: after?'seqB':'shared',
+      note: after?'Y wrote 88':'shared prompt (ref 2)' },
+    ...(after ? [{ id:5, label:'11,12,77,·', ref:1, cls:'seqA', note:'COPY of #0 · X wrote 77', copy:true }] : []),
+  ];
+
+  el('cowBeams').innerHTML = beams.map(b=>`
+    <div class="seqrow" style="border-color:${b.col}">
+      <div class="hd">
+        <span class="seqname" style="color:${b.col}">beam ${b.name}</span>
+        <span class="tokens">${b.wrote?('wants to write token <b style="color:'+b.col+'">'+b.wrote+'</b>'):'forked from shared prompt'}</span>
+      </div>
+      <div class="btable"><span class="lbl">block_table:</span>${
+        b.table.map(([l,p],i)=> `<span class="bcell">${l}</span><span class="bcell arrow">→</span><span class="bcell" style="color:${b.col};border-color:${b.col}">${p}</span>` ).join('<span class="bcell arrow">,</span>')
+      }</div>
+    </div>`).join('');
+
+  el('cowPhys').innerHTML = physBlocks.map(b=>`
+    <div class="block ${b.cls}${b.copy?' justalloc':''}" style="aspect-ratio:auto;min-height:72px;flex:0 0 120px">
+      <span class="bid">#${b.id}</span><span class="ref">×${b.ref}</span>
+      <span class="label">${after ? (b.id===5?'Beam X':'Beam Y') : 'Shared'}</span>
+      ${slotMarkup(b.label.split(',').map(x=>x==='·'?null:Number(x)))}
+      <span class="fill">${b.note}</span>
+    </div>`).join('');
+
+  el('cowCaption').innerHTML = after
+    ? `<b style="color:var(--red)">COPY happened:</b> block #0 was duplicated into #5 the instant beam X needed to write a diverging token. X's L0→#5 (ref1), Y's L0→#0 (ref1). The shared prefix "11,12" now exists twice.`
+    : `<b>Shared & writable:</b> both beams have a single logical block <b>L0 → the same physical #0</b> (ref 2), which still has two free slots. No copy yet — a copy is only triggered <i>by a write</i>.`;
+}
+
+function renderProfile(s){
+  // Warmup batch: 4 dummy seqs of seq_len 4096, total 16384 = max_num_batched_tokens
+  const batch = el('warmupBatch');
+  const NUM_SEQS = 4, SEQ_LEN = 4096;
+  const seqsHtml = Array.from({length:NUM_SEQS}, (_,i)=>
+    `<div class="warmup-seq">
+       <span class="wlabel">dummy ${i}</span>
+       <div class="wbar">[0] × ${SEQ_LEN} tokens</div>
+     </div>`).join('');
+  batch.innerHTML = seqsHtml +
+    `<div class="warmup-note">
+       <b>seq_len</b> = min(max_num_batched_tokens, max_model_len) = min(16384, 4096) = <b>4096</b><br>
+       <b>num_seqs</b> = min(max_num_batched_tokens // seq_len, max_num_seqs) = min(4, 512) = <b>4</b><br>
+       Illustrative configuration: 4 × 4096 = <b>16384 tokens</b>, filling this example’s token budget.
+     </div>`;
+
+  // Memory bar — segments as flex ratios. In carve mode the KV slice appears.
+  const mem = el('memBar');
+  const carve = s.profileMode === 'carve';
+  // illustrative GPU split (flex weights, not real GB)
+  const segs = carve
+    ? [['weights',34,'model weights'], ['peak',22,'peak activations'], ['kv',34,'KV cache (16 blocks)'], ['reserve',10,'10% reserved']]
+    : [['weights',34,'model weights'], ['peak',22,'peak activations (measured now)'], ['reserve',44,'free — not yet carved']];
+  mem.innerHTML = segs.map(([cls,w,txt])=>
+    `<div class="memseg ${cls}" style="flex:${w}">${w>=18?txt:''}</div>`).join('');
+
+  el('memLegend').innerHTML = [
+    ['#6e7681','model weights'],
+    ['var(--amber)','peak activations — what warmup measures'],
+    carve?['var(--green)','KV cache = leftover ÷ block_bytes']:null,
+    ['#30363d', carve?'reserved (1 − gpu_memory_utilization)':'free memory (becomes KV cache)'],
+  ].filter(Boolean).map(([c,t])=>`<span><i style="background:${c}"></i>${t}</span>`).join('');
+}
+
+function renderArch(s){
+  const g = el('archGrid');
+  g.innerHTML = ARCH.map(a=>`
+    <div class="box ${a.cls}">
+      <span class="tag">${a.tag}</span>
+      <h4>${a.h}</h4>
+      <div>${a.b}</div>
+    </div>`).join('');
+}
+
+function renderTrace(s){
+  el('traceWrap').style.display=s.trace?'block':'none';
+  if (!s.trace) return;
+  const rows=pressure.rows.map(r=>'<tr class="'+(r.preempted?'exhaust':'')+'"><td>'+r.step+'</td>'+['A','B','C'].map(name=>{
+    const c=r.cells[name];
+    return '<td class="'+(c.allocation!==null && c.allocation!==undefined?'alloc':'')+'">'+c.before+(c.preempted?' → WAITING':' → '+c.after)+(c.allocation!==null && c.allocation!==undefined?'<br>allocate #'+c.allocation:'')+(c.victim?'<br>preempt '+c.victim:'')+'</td>';
+  }).join('')+'<td>'+r.free+'</td></tr>').join('');
+  el('traceTable').innerHTML='<caption class="slot-key">Token IDs before → after each iteration; allocation precedes the forward pass.</caption><thead><tr><th>Iteration</th><th>A</th><th>B</th><th>C</th><th>Free after scheduling</th></tr></thead><tbody>'+rows+'</tbody>';
+  el('traceCap').textContent='Start: A='+pressure.initial[0].tokens.length+', B='+pressure.initial[1].tokens.length+', C='+pressure.initial[2].tokens.length+'. Need a new page when the input length % 4 == 1. On iteration 5, C releases 10 pages and B takes one, leaving 9 free before A’s EOS cleanup.';
+}
+
+let lookupSelection=null;
+function slotMarkup(values, pending=[], newSlots=[], selected=-1) {
+  return '<div class="slots">'+Array.from({length:BLOCK_SIZE},(_,i)=>{
+    const value=values[i], waiting=value===null && pending[i]!=null;
+    const cls=(value!==null?'filled':waiting?'pending':'empty')+(newSlots.includes(i)?' new':'')+(selected===i?' selected':'');
+    const text=value!==null?value:waiting?pending[i]:'–';
+    return '<span class="slot '+cls+'" title="Offset '+i+': '+(value!==null?'K/V written for token '+value:waiting?'token '+pending[i]+', K/V not written':'unused capacity')+'">'+text+'</span>';
+  }).join('')+'</div>';
+}
+function renderIntro(){
+  const tokens=[11,12,13,14,15,16,17];
+  const cells=n=>Array.from({length:n},(_,i)=>'<span class="slot '+(i<7?'filled':'empty')+'">'+(tokens[i]??'–')+'</span>').join('');
+  el('introView').innerHTML='<div class="intro-grid"><section class="intro-card"><h3>Reserve for a possible 16 tokens</h3><p>An illustrative contiguous reservation for one request with 7 cached positions.</p><div class="intro-slots">'+cells(16)+'</div><p>16 positions reserved · <b>9 unused</b></p></section><section class="intro-card"><h3>Allocate four-token pages as needed</h3><p>The same 7 positions fit in two pages, wherever free GPU blocks are available.</p><div class="intro-slots">'+cells(8)+'</div><p class="intro-result">8 positions allocated · 1 unused</p><p>When another page is needed, append its ID to the block table. Existing pages stay in place.</p></section></div><div class="lookup"><b>Logical order stays simple. Physical storage can be scattered.</b><div class="lookup-path">positions 0–3 → <strong>L0 → #2</strong> &nbsp; positions 4–6 → <strong>L1 → #0</strong></div><p class="slot-key">A simplified comparison, not a claim that every contiguous allocator reserves exactly 16 positions. Paging bounds unused tail capacity to less than one page after a write; newly allocated pages are initially empty.</p></div>';
+}
+function renderLookup(s){
+  const candidates=(s.seqs||[]).filter(x=>x.blockTable.length);
+  el('lookup').hidden=!candidates.length;
+  if (!candidates.length) return null;
+  let sq=candidates.find(x=>x.name===lookupSelection?.name) || candidates.find(x=>(s.writing||[]).some(id=>x.blockTable.includes(id))) || candidates[0];
+  let pos=lookupSelection?.name===sq.name?Math.min(lookupSelection.pos,sq.tokens.length-1):Math.max(0,(sq.written??sq.cached)-1);
+  lookupSelection={name:sq.name,pos};
+  const logical=Math.floor(pos/BLOCK_SIZE),offset=pos%BLOCK_SIZE,bid=sq.blockTable[logical];
+  const written=sq.written??sq.cached;
+  const controls='<div class="lookup-controls"><b>Follow a token</b><label>Sequence <select id="lookupSeq">'+candidates.map(x=>'<option '+(x.name===sq.name?'selected':'')+'>'+x.name+'</option>').join('')+'</select></label><label>Position (zero-based) <select id="lookupPos">'+sq.tokens.map((t,i)=>'<option value="'+i+'" '+(i===pos?'selected':'')+'>'+i+' · token '+t+'</option>').join('')+'</select></label></div>';
+  const path='<div class="lookup-path">position <strong>'+pos+'</strong> → logical <strong>L'+logical+'</strong> → physical <strong>'+(bid===undefined?'not allocated':'#'+bid)+'</strong> → offset <strong>'+offset+'</strong>'+(bid===undefined?'':' → flat slot <strong>'+(bid*4+offset)+'</strong>')+'</div>';
+  const status=pos<written?'K/V is present for this position.':bid===undefined?'This token has no allocated page yet.':'Capacity is allocated; this token’s K/V has not been written yet.';
+  const reads=s.phase==='decode' && s.lookup;
+  const readPath=reads?'<p class="slot-key">The current query attends to '+written+' written positions, including itself. Follow its K/V reads through the block table:</p><div class="read-path">'+sq.blockTable.map((id,i)=>'<button data-read="'+(i*4)+'">L'+i+' → #'+id+'</button>').join('')+'</div>':'';
+  el('lookup').innerHTML=controls+path+'<div class="slot-key">'+status+' Slot = block ID × 4 + offset.</div>'+readPath;
+  el('lookupSeq').onchange=e=>{lookupSelection={name:e.target.value,pos:0};renderPool(s);el('lookupSeq').focus();};
+  el('lookupPos').onchange=e=>{lookupSelection={name:sq.name,pos:Number(e.target.value)};renderPool(s);el('lookupPos').focus();};
+  el('lookup').querySelectorAll('[data-read]').forEach(btn=>{btn.onclick=()=>{lookupSelection={name:sq.name,pos:Number(btn.dataset.read)};renderPool(s);};});
+  return {name:sq.name,pos,logical,offset,bid};
+}
+function renderPool(s){
+  renderTrace(s);
+  const selected=renderLookup(s);
+  const blocks=poolFrom(s.seqs||[],s.writing||[],s.sharedIds||new Set(),s.retained||[]);
+  const free=freeCount(blocks), reusable=blocks.filter(b=>b.cls==='retained').length;
+  el('poolStat').textContent='· '+free+' free ('+reusable+' cached) · '+(NUM_BLOCKS-free)+' allocated';
+  el('pool').innerHTML=blocks.map(b=>{
+    const alloc=(s.justAlloc||[]).includes(b.id)?' justalloc':'';
+    const writing=b.writing?' writing':'';
+    const active=selected?.bid===b.id;
+    return '<div class="block '+b.cls+alloc+writing+(active?' selected':'')+'" data-block="'+b.id+'"><span class="bid">#'+b.id+'</span><span class="ref">ref '+b.ref+'</span><span class="label">'+b.label+'</span>'+slotMarkup(b.slots,b.pending,b.newSlots,active?selected.offset:-1)+'<span class="fill">'+b.fill+'/4 written</span></div>';
+  }).join('');
+  el('seqs').innerHTML=(s.seqs||[]).map(sq=>{
+    const status=sq.status.startsWith('WAITING')?(sq.status.includes('preempt')?'s-preempt':'s-waiting'):sq.status==='RUNNING'?'s-running':'s-finished';
+    const written=sq.written??sq.cached;
+    const bt=sq.blockTable.length?sq.blockTable.map((id,i)=>'<button class="bcell '+(selected?.name===sq.name && selected.logical===i?'selected':'')+'" data-seq="'+sq.name+'" data-pos="'+i*4+'">L'+i+' → #'+id+'</button>').join(' '):'<span class="slot-key">No allocated blocks</span>';
+    const toks=sq.tokens.length>12?sq.tokens.slice(0,6).join(',')+' … '+sq.tokens.slice(-3).join(','):sq.tokens.join(',');
+    return '<div class="seqrow"><div class="hd"><span class="seqname">'+sq.name+'</span><span class="status-pill '+status+'">'+sq.status+'</span><span class="tokens">'+sq.tokens.length+' token IDs: ['+toks+']</span></div><div class="btable"><span class="lbl">block_table:</span>'+bt+'</div><div class="meta-line">'+written+' K/V positions held · '+sq.blockTable.length+' allocated pages · '+sq.scheduled+' scheduled tokens</div><div class="meta-line">num_cached_tokens='+sq.cached+(written!==sq.cached?' (updated after this forward pass)':'')+'</div></div>';
+  }).join('');
+  el('seqs').querySelectorAll('[data-seq]').forEach(btn=>{btn.onclick=()=>{lookupSelection={name:btn.dataset.seq,pos:Number(btn.dataset.pos)};renderPool(s);};});
+}
+function renderJump(){
+  const phases=[['intro','Why pages'],['1','Profile'],['4','Prefill'],['6','Decode'],['9','Prefix'],['11','COW (hypo)'],['pressure','Scheduler'],['preempt','Preempt'],['resume','Resume'],['16','Recap']];
+  const indexed=phases.map(([id,t])=>({i:STEPS.findIndex(s=>s.id===id),t}));
+  indexed.splice(1,0,{i:STEPS.findIndex(s=>s.arch && !s.recap),t:'Architecture'});
+  el('jump').innerHTML=indexed.map(p=>'<button data-i="'+p.i+'" '+(cur===p.i?'aria-current="step"':'')+'>'+p.t+'</button>').join('');
+  el('jump').querySelectorAll('button').forEach(btn=>{btn.onclick=()=>goTo(Number(btn.dataset.i));});
+}
+function goTo(i){
+  cur=Math.max(0,Math.min(i,STEPS.length-1)); lookupSelection=null; render();
+  history.replaceState(null,'','#'+STEPS[cur].id);
+  window.scrollTo({top:0,behavior:'instant'});
+}
+el('next').onclick=()=>goTo(cur+1);
+el('prev').onclick=()=>goTo(cur-1);
+el('reset').onclick=()=>goTo(0);
+document.addEventListener('keydown',e=>{
+  if (e.target.closest('select,input,textarea,[contenteditable=true]') || e.altKey || e.ctrlKey || e.metaKey) return;
+  if(e.key==='ArrowRight'){e.preventDefault();goTo(cur+1);}
+  if(e.key==='ArrowLeft'){e.preventDefault();goTo(cur-1);}
+});
+const requested=STEPS.findIndex(s=>s.id===location.hash.slice(1));
+if(requested>=0) cur=requested;
+render();
+
+</script>
+</body>
+</html>
